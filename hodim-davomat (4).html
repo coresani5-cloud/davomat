@@ -186,7 +186,7 @@ if(!data.location)data.location=null;
 // PASTDAGI MANZILNI O'ZINGIZNING Firebase Realtime Database manzilingizga almashtiring.
 // Qanday olish: console.firebase.google.com -> loyiha yarating -> Realtime Database -> yoqing
 // -> Rules'ni {"rules":{".read":true,".write":true}} qiling -> yuqoridagi manzilni shu yerga qo'ying.
-const CLOUD_URL='https://sardorbek-df41e-default-rtdb.firebaseio.com/hodim.json';
+const CLOUD_URL='https://SIZNING-PROJECT-ID-default-rtdb.firebaseio.com/hodim.json';
 let cloudOk=true;
 async function loadRemote(){
  if(CLOUD_URL.includes('SIZNING-PROJECT-ID')){cloudOk=false;return}
