@@ -19,14 +19,17 @@ export default {
     if (!env.VAPID_PRIVATE) return new Response('XATO: Cloudflare sozlamasida VAPID_PRIVATE kiritilmagan', { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } });
     const url = new URL(req.url);
     if (url.pathname === '/test') {            // Sinov: barcha obunachilarga xabar
-      const all = (await dbGet('/hodimPush/subs')) || {};
-      let n = 0;
+      const probe = await fetch(`${DB}/hodim/push.json?shallow=true`);
+      if (!probe.ok) return new Response(`XATO: Firebase bazasini o'qib bo'lmadi (kod ${probe.status})`, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      const all = (await dbGet('/hodim/push/subs')) || {};
+      let n = 0, bad = 0;
       for (const [empId, subs] of Object.entries(all))
         for (const [key, s] of Object.entries(subs || {})) {
           const r = await sendPush(s.sub, { title: 'HODIM', body: '🔔 Sinov: eslatmalar ishlayapti!', type: 'test' });
-          if (r === 404 || r === 410) await dbDel(`/hodimPush/subs/${empId}/${key}`); else n++;
+          if (r === 404 || r === 410) await dbDel(`/hodim/push/subs/${empId}/${key}`);
+          else if (r >= 200 && r < 300) n++; else bad++;
         }
-      return new Response(`Yuborildi: ${n} ta telefonga`, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      return new Response(`Yuborildi: ${n} ta telefonga` + (bad ? `\nXato: ${bad} ta telefonga yuborilmadi` : ''), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
     }
     const r = await run();
     return new Response('HODIM push server ishlayapti ✅\n' + r, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
@@ -38,7 +41,7 @@ async function run() {
   const t = new Date(Date.now() + TZ_OFFSET_MIN * 60000);
   const date = t.toISOString().slice(0, 10);
   const cur = t.getUTCHours() * 60 + t.getUTCMinutes();
-  const P = (await dbGet('/hodimPush')) || {};
+  const P = (await dbGet('/hodim/push')) || {};
   const subs = P.subs || {}, sched = P.sched || {}, status = P.status || {};
   const fired = (P.fired && P.fired[date]) || {};
   let sent = 0, changed = false;
@@ -57,11 +60,11 @@ async function run() {
       const left = at - cur;
       for (const [key, s] of Object.entries(devs || {})) {
         const r = await sendPush(s.sub, { title: '⏰ ' + text, body: `${left} daqiqadan keyin ${type === 'in' ? 'ish boshlanadi' : 'ish tugaydi'}. Ilovani ochib belgilang.`, type });
-        if (r === 404 || r === 410) await dbDel(`/hodimPush/subs/${empId}/${key}`); else sent++;
+        if (r === 404 || r === 410) await dbDel(`/hodim/push/subs/${empId}/${key}`); else sent++;
       }
     }
   }
-  if (changed) await dbPut('/hodimPush/fired', { [date]: fired });  // eski kunlar o'chadi
+  if (changed) await dbPut('/hodim/push/fired', { [date]: fired });  // eski kunlar o'chadi
   return `${date} ${String(Math.floor(cur / 60)).padStart(2, '0')}:${String(cur % 60).padStart(2, '0')} — yuborildi: ${sent}`;
 }
 function toMin(s) { const [h, m] = String(s || '00:00').split(':').map(Number); return h * 60 + m; }
