@@ -1,0 +1,127 @@
+// ================================================================
+//  HODIM — Push eslatma serveri (Cloudflare Worker)
+//  Har daqiqada ishlaydi: ish boshlanishi/tugashidan 5 va 1 daqiqa oldin
+//  xodim telefoniga "KIRISH/CHIQISH QILISHNI UNUTMANG!" push-xabarini yuboradi.
+//  Maxfiy kalit bu faylda YO'Q — u Cloudflare sozlamasida VAPID_PRIVATE nomi bilan saqlanadi.
+// ================================================================
+const DB = 'https://sardorbek-df41e-default-rtdb.firebaseio.com';  // Firebase manzili
+const TZ_OFFSET_MIN = 5 * 60;          // Toshkent vaqti (UTC+5)
+const OFFSETS = [5, 1];                // necha daqiqa oldin eslatish (5 va 1 daqiqa)
+const APP_URL = 'https://coresani5-cloud.github.io/davomat/';
+const VAPID_PUBLIC = 'BC5NthMD_-bMu8gCP1KMJXgCaSI_szJL2OPdFew2vqXA45X8LSH8X9ezy_09zAky7zv55O6d7Y2j8mXMny70Oio';
+const VAPID_PUB_JWK = {"kty": "EC", "crv": "P-256", "x": "Lk22EwP_5sy7yAI_UowleAJpIj-zMkvY490V7Da-pcA", "y": "45X8LSH8X9ezy_09zAky7zv55O6d7Y2j8mXMny70Oio"};  // ochiq qism
+let ENV = {};
+
+export default {
+  async scheduled(event, env, ctx) { ENV = env; ctx.waitUntil(run()); },
+  async fetch(req, env) {
+    ENV = env;
+    if (!env.VAPID_PRIVATE) return new Response('XATO: Cloudflare sozlamasida VAPID_PRIVATE kiritilmagan', { status: 500, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    const url = new URL(req.url);
+    if (url.pathname === '/test') {            // Sinov: barcha obunachilarga xabar
+      const probe = await fetch(`${DB}/hodim/push.json?shallow=true`);
+      if (!probe.ok) return new Response(`XATO: Firebase bazasini o'qib bo'lmadi (kod ${probe.status})`, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+      const all = (await dbGet('/hodim/push/subs')) || {};
+      let n = 0, bad = 0;
+      for (const [empId, subs] of Object.entries(all))
+        for (const [key, s] of Object.entries(subs || {})) {
+          const r = await sendPush(s.sub, { title: 'HODIM', body: '🔔 Sinov: eslatmalar ishlayapti!', type: 'test' });
+          if (r === 404 || r === 410) await dbDel(`/hodim/push/subs/${empId}/${key}`);
+          else if (r >= 200 && r < 300) n++; else bad++;
+        }
+      return new Response(`Yuborildi: ${n} ta telefonga` + (bad ? `\nXato: ${bad} ta telefonga yuborilmadi` : ''), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
+    const r = await run();
+    return new Response('HODIM push server ishlayapti ✅\n' + r, { headers: { 'content-type': 'text/plain; charset=utf-8' } });
+  }
+};
+
+// ---------------- Asosiy tekshiruv ----------------
+async function run() {
+  const t = new Date(Date.now() + TZ_OFFSET_MIN * 60000);
+  const date = t.toISOString().slice(0, 10);
+  const cur = t.getUTCHours() * 60 + t.getUTCMinutes();
+  const P = (await dbGet('/hodim/push')) || {};
+  const subs = P.subs || {}, sched = P.sched || {}, status = P.status || {};
+  const fired = (P.fired && P.fired[date]) || {};
+  let sent = 0, changed = false;
+  for (const [empId, devs] of Object.entries(subs)) {
+    const sc = sched[empId] || { start: '08:00', end: '19:00' };
+    const st = (status[empId] && status[empId].date === date) ? status[empId] : { in: false, out: false };
+    const jobs = [];
+    if (!st.in) jobs.push(['in', toMin(sc.start), 'KIRISH QILISHNI UNUTMANG!']);
+    if (st.in && !st.out) jobs.push(['out', toMin(sc.end), 'CHIQISH QILISHNI UNUTMANG!']);
+    for (const [type, at, text] of jobs) {
+      if (cur >= at) continue;
+      // Vaqti kelgan, lekin hali yuborilmagan eslatmalar (bir vaqtda faqat bittasi yuboriladi)
+      const due = OFFSETS.filter(o => cur >= at - o && !fired[`${empId}_${type}${o}`]);
+      if (!due.length) continue;
+      due.forEach(o => fired[`${empId}_${type}${o}`] = true); changed = true;
+      const left = at - cur;
+      for (const [key, s] of Object.entries(devs || {})) {
+        const r = await sendPush(s.sub, { title: '⏰ ' + text, body: `${left} daqiqadan keyin ${type === 'in' ? 'ish boshlanadi' : 'ish tugaydi'}. Ilovani ochib belgilang.`, type });
+        if (r === 404 || r === 410) await dbDel(`/hodim/push/subs/${empId}/${key}`); else sent++;
+      }
+    }
+  }
+  if (changed) await dbPut('/hodim/push/fired', { [date]: fired });  // eski kunlar o'chadi
+  return `${date} ${String(Math.floor(cur / 60)).padStart(2, '0')}:${String(cur % 60).padStart(2, '0')} — yuborildi: ${sent}`;
+}
+function toMin(s) { const [h, m] = String(s || '00:00').split(':').map(Number); return h * 60 + m; }
+
+// ---------------- Firebase ----------------
+async function dbGet(p) { const r = await fetch(`${DB}${p}.json`); return r.ok ? r.json() : null; }
+async function dbPut(p, v) { await fetch(`${DB}${p}.json`, { method: 'PUT', body: JSON.stringify(v) }); }
+async function dbDel(p) { await fetch(`${DB}${p}.json`, { method: 'DELETE' }); }
+
+// ---------------- Web Push (VAPID + aes128gcm, RFC 8291/8292) ----------------
+const enc = new TextEncoder();
+const b64u = {
+  enc: b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: s => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+};
+const cat = (...a) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
+
+async function vapidJWT(aud) {
+  const key = await crypto.subtle.importKey('jwk', { ...VAPID_PUB_JWK, d: String(ENV.VAPID_PRIVATE || '').trim() }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const h = b64u.enc(enc.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const p = b64u.enc(enc.encode(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: APP_URL })));
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, enc.encode(`${h}.${p}`));
+  return `${h}.${p}.${b64u.enc(sig)}`;
+}
+async function hkdf(salt, ikm, info, len) {
+  const k = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, k, len * 8));
+}
+async function encryptPayload(sub, data) {
+  const uaPub = b64u.dec(sub.keys.p256dh), auth = b64u.dec(sub.keys.auth);
+  const as = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', as.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, as.privateKey, 256));
+  const ikm = await hkdf(auth, ecdh, cat(enc.encode('WebPush: info\0'), uaPub, asPub), 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(salt, ikm, enc.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(salt, ikm, enc.encode('Content-Encoding: nonce\0'), 12);
+  const k = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, k, cat(enc.encode(data), new Uint8Array([2]))));
+  const rs = new Uint8Array([0, 0, 16, 0]);  // 4096
+  return cat(salt, rs, new Uint8Array([asPub.length]), asPub, ct);
+}
+async function sendPush(sub, msg) {
+  try {
+    const u = new URL(sub.endpoint);
+    const body = await encryptPayload(sub, JSON.stringify(msg));
+    const r = await fetch(sub.endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `vapid t=${await vapidJWT(u.origin)}, k=${VAPID_PUBLIC}`,
+        'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream',
+        'TTL': '600', 'Urgency': 'high'
+      },
+      body
+    });
+    return r.status;
+  } catch (e) { return 0; }
+}
+// exportlar faqat sinov uchun
