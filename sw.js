@@ -1,6 +1,6 @@
 // HODIM service worker: sahifa har doim avval internetdan olinadi (yangilanishlar darrov ko'rinadi),
 // internet bo'lmasa oxirgi saqlangan nusxa ochiladi. Firebase so'rovlariga tegmaydi.
-const CACHE = 'hodim-v1';
+const CACHE = 'hodim-v2';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -29,4 +29,13 @@ self.addEventListener('fetch', e => {
       return res;
     }).catch(() => caches.match(req).then(r => r || caches.match('./')))
   );
+});
+
+// Eslatma bildirishnomasi bosilganda ilovani ochish
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  e.waitUntil(self.clients.matchAll({type:'window', includeUncontrolled:true}).then(list => {
+    for (const c of list) { if ('focus' in c) return c.focus(); }
+    return self.clients.openWindow('./');
+  }));
 });
