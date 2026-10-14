@@ -1,5 +1,6 @@
 // HODIM service worker
-const CACHE = 'hodim-v4';
+const CACHE = 'hodim-v5';
+const FACE_CACHE = 'hodim-face-v1'; // Face ID kutubxonasi (bir marta yuklanadi, internetsiz ham ishlaydi)
 const SHELL = ['./', 'index.html', 'hodim-manifest.json', 'hodim-192.png', 'hodim-512.png'];
 
 self.addEventListener('install', e => {
@@ -9,7 +10,7 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE && k !== FACE_CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -18,6 +19,10 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
+  if ((url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'unpkg.com') && url.pathname.includes('@vladmandic/human@')) {
+    e.respondWith(caches.open(FACE_CACHE).then(c => c.match(req).then(hit => hit || fetch(req).then(res => { if (res && res.ok) c.put(req, res.clone()).catch(() => {}); return res; }))));
+    return;
+  }
   if (url.origin !== location.origin) return;
   e.respondWith(
     // Har doim serverdan yangisini tekshiradi (brauzer keshidagi eski versiya ko'rsatilmaydi)
@@ -27,7 +32,7 @@ self.addEventListener('fetch', e => {
         caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
       }
       return res;
-    }).catch(() => caches.match(req).then(r => r || caches.match('./')))
+    }).catch(() => caches.match(req, { ignoreSearch: req.mode === 'navigate' }).then(r => r || caches.match('./') || caches.match('index.html')))
   );
 });
 
